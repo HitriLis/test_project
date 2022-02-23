@@ -1,9 +1,14 @@
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.encoders import jsonable_encoder
 from fastapi_jwt_auth import AuthJWT
 from fastapi_jwt_auth.exceptions import AuthJWTException
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError, validator
 from typing import Optional
+from django.core.exceptions import ObjectDoesNotExist
+import re
+
 from callback.models import (
     Player,
     Game
@@ -48,6 +53,21 @@ class PlayerItem(BaseModel):
     name:str
     email:str
 
+    @validator("email")
+    def check_email_format(cls, v):
+        regex = re.compile(r'([A-Za-z0-9]+[.-_])*[A-Za-z0-9]+@[A-Za-z0-9-]+(\.[A-Z|a-z]{2,})+')
+        if re.fullmatch(regex, v):
+            return v
+        else:
+            raise ValueError('email do not match')
+
+    @validator("name")
+    def check_name_format(cls, v):
+        if re.match("^[A-Fa-f0-9]*$", v):
+            return v
+        else:
+            raise ValueError('name do not match [A-Fa-f0-9]')
+
 
 class GameItem(BaseModel):
     name:str
@@ -72,6 +92,12 @@ def authjwt_exception_handler(request: Request, exc: AuthJWTException):
         content={"detail": exc.message}
     )
 
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(
+        status_code=400,
+        content=jsonable_encoder({"status": "error", "message": {'msg': i['msg'] for i in exc.errors()}}),
+    )
 
 # provide a method to create access tokens. The create_access_token()
 # function is used to actually generate the token to use authorization
@@ -141,11 +167,13 @@ def create_new_player(player: PlayerItem, Authorize: AuthJWT = Depends()):
     Creates new player.
     """
     Authorize.jwt_required()
-
-    new_player = Player()
-    new_player.name = player.name
-    new_player.email = player.email
-    new_player.save()
+    try:
+        new_player = Player()
+        new_player.name = player.name
+        new_player.email = player.email
+        new_player.save()
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"status": "error", "message": "player with such name or email already exists"})
     
     return JSONResponse(content={"status": "success", "id": new_player.id, "success": True})
 
@@ -165,11 +193,18 @@ def create_new_game(game: GameItem, Authorize: AuthJWT = Depends()):
 
 
 @app.post('/add_player_to_game', tags=['Main'], responses={200: {"model": StatusMessage}, 400: {"model": ErrorMessage}})
-def add_player_to_game(game_id:int, player_id:int, Authorize: AuthJWT = Depends()):
+def add_player_to_game(game_id:int, player_id:int):
     """
     Adds existing player to existing game.
     """
-    Authorize.jwt_required()
-
+    # Authorize.jwt_required()
+    player = Player.objects.filter(pk=player_id).first()
+    game = Game.objects.filter(pk=game_id).first()
+    if player is None:
+        return JSONResponse(status_code=400, content={"status": "error", "message": 'Игрок с таким id не существует'})
+    elif game is None:
+        return JSONResponse(status_code=400, content={"status": "error", "message": 'Игра с таким id не существует'})
+    elif game.players_count() >= 5:
+        return JSONResponse(status_code=400, content={"status": "error", "message": 'Максимальное количество игроков в одной игре не более 5'})
+    game.players.add(player)
     return JSONResponse(content={"status": "success", "id": game_id, "success": True})
-
